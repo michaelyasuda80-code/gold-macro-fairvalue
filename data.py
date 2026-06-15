@@ -35,22 +35,29 @@ UNIVERSE: tuple[Series, ...] = (
     Series("CNY=X", "USD/CNY", "usd", "log",
            "China gold demand proxy"),
     # --- Rates (real-yield proxy is built from these) ---
-    Series("^TNX", "US 10Y yield", "rates", "yield"),
+    Series("^IRX", "US 13w T-bill yield (front-end/policy)", "rates", "yield"),
     Series("^FVX", "US 5Y yield", "rates", "yield"),
+    Series("^TNX", "US 10Y yield", "rates", "yield"),
     Series("^TYX", "US 30Y yield", "rates", "yield"),
     Series("TIP", "TIPS ETF (real-yield proxy, inverse)", "rates", "log"),
     Series("IEF", "7-10Y Treasury ETF", "rates", "log"),
     Series("TLT", "20+Y Treasury ETF", "rates", "log"),
+    # --- Credit (risk appetite / financial conditions) ---
+    Series("HYG", "High-yield corp bond ETF", "credit", "log"),
+    Series("LQD", "Investment-grade corp bond ETF", "credit", "log"),
     # --- Energy / commodities ---
     Series("CL=F", "WTI crude", "commodity", "log"),
     Series("BZ=F", "Brent crude", "commodity", "log"),
     Series("NG=F", "Natural gas", "commodity", "log"),
     Series("HG=F", "Copper (China/industrial)", "commodity", "log"),
     Series("SI=F", "Silver (gold/silver ratio cross-check)", "commodity", "log"),
+    Series("PL=F", "Platinum", "commodity", "log"),
+    Series("PA=F", "Palladium", "commodity", "log"),
     # --- Risk ---
     Series("^VIX", "VIX (equity vol)", "risk", "log"),
     Series("^GSPC", "S&P 500", "risk", "log"),
     Series("EEM", "EM equities ETF", "risk", "log"),
+    Series("FXI", "China large-cap ETF", "risk", "log"),
     # --- Crypto (alt store of value) ---
     Series("BTC-USD", "Bitcoin", "alt", "log"),
 )
@@ -90,9 +97,9 @@ def transform(series_def: Series, raw: pd.Series) -> pd.Series:
     if series_def.transform == "log":
         s = np.log(s.replace(0, np.nan))
     elif series_def.transform == "yield":
-        # Yahoo returns 10Y yield as e.g. 45.0 meaning 4.50%.
-        # Convert to percent (4.50).
-        s = s / 10.0
+        # Yahoo's ^TNX/^FVX/^TYX/^IRX already come as percent (e.g. 4.49 = 4.49%).
+        # No scaling needed — leave as-is so the real-yield proxy is in real %.
+        s = s
     return s.rename(series_def.ticker)
 
 
@@ -119,18 +126,25 @@ def build_panel(universe: Iterable[Series] = UNIVERSE,
 
 
 def add_engineered(panel: pd.DataFrame) -> pd.DataFrame:
-    """Add derived series the model cares about (real-yield proxy, BEI proxy)."""
+    """Add derived series the model cares about (real-yield proxy, BEI, credit…)."""
     out = panel.copy()
     # Inflation expectation proxy: log(TIP) - log(IEF).
     # When BEI rises, TIPs outperform nominals -> ratio rises.
     if "TIP" in out and "IEF" in out:
         out["BEI_PROXY"] = out["TIP"] - out["IEF"]
-    # Real-yield proxy = 10Y nominal - BEI proxy (scaled).
-    # We scale the proxy so it sits in a sensible range; the regression
-    # absorbs the scale via its beta, so absolute calibration doesn't matter.
+    # Real-yield proxy = 10Y nominal (%) - breakeven-momentum adjustment.
+    # ^TNX is now in true percent, so this sits in a real-yield-like range and
+    # is dominated by the nominal level (correct), nudged by recent breakeven.
     if "^TNX" in out and "BEI_PROXY" in out:
         bei_centered = out["BEI_PROXY"] - out["BEI_PROXY"].rolling(252, min_periods=60).mean()
         out["REAL_YIELD_PROXY"] = out["^TNX"] - 100 * bei_centered
+    # Credit risk appetite: log(HYG) - log(LQD). Falls when high-yield
+    # underperforms investment-grade, i.e. credit stress / risk-off.
+    if "HYG" in out and "LQD" in out:
+        out["CREDIT_PROXY"] = out["HYG"] - out["LQD"]
+    # Yield-curve slope (10Y - 5Y), a growth/term-premium signal.
+    if "^TNX" in out and "^FVX" in out:
+        out["CURVE_10Y_5Y"] = out["^TNX"] - out["^FVX"]
     # Gold/Silver ratio (sentiment, not a driver — keep for cross-check)
     if "GC=F" in out and "SI=F" in out:
         out["GOLD_SILVER"] = out["GC=F"] - out["SI=F"]
@@ -146,4 +160,62 @@ DEFAULT_FACTORS: tuple[str, ...] = (
     "^GSPC",
     "BTC-USD",
     "CNY=X",
+    "CREDIT_PROXY",
 )
+
+# Every factor the sidebar can offer (curated + extended), grouped for display.
+ALL_FACTORS: tuple[str, ...] = (
+    # rates / inflation
+    "REAL_YIELD_PROXY", "BEI_PROXY", "^IRX", "^FVX", "^TNX", "^TYX",
+    "CURVE_10Y_5Y", "TIP", "IEF", "TLT",
+    # usd / fx
+    "DX-Y.NYB", "JPY=X", "EURUSD=X", "CNY=X",
+    # credit
+    "CREDIT_PROXY", "HYG", "LQD",
+    # commodity
+    "CL=F", "BZ=F", "NG=F", "HG=F", "SI=F", "PL=F", "PA=F",
+    # risk
+    "^VIX", "^GSPC", "EEM", "FXI",
+    # alt
+    "BTC-USD",
+)
+
+# Japanese display labels for every factor (UI + charts). Fallback = code.
+FACTOR_LABELS_JA: dict[str, str] = {
+    "GC=F": "金（COMEX先物）",
+    "DX-Y.NYB": "ドル指数(DXY)",
+    "JPY=X": "ドル円",
+    "EURUSD=X": "ユーロドル",
+    "CNY=X": "ドル人民元",
+    "^IRX": "米13週Tビル(政策金利)",
+    "^FVX": "米5年金利",
+    "^TNX": "米10年金利",
+    "^TYX": "米30年金利",
+    "CURVE_10Y_5Y": "利回り曲線(10年-5年)",
+    "TIP": "TIPS ETF",
+    "IEF": "米7-10年債ETF",
+    "TLT": "米20年超債ETF",
+    "HYG": "ハイイールド債ETF",
+    "LQD": "投資適格債ETF",
+    "CREDIT_PROXY": "クレジット選好(HY/IG)",
+    "CL=F": "WTI原油",
+    "BZ=F": "ブレント原油",
+    "NG=F": "天然ガス",
+    "HG=F": "銅",
+    "SI=F": "銀",
+    "PL=F": "プラチナ",
+    "PA=F": "パラジウム",
+    "^VIX": "VIX(株式恐怖指数)",
+    "^GSPC": "S&P500",
+    "EEM": "新興国株ETF",
+    "FXI": "中国大型株ETF",
+    "BTC-USD": "ビットコイン",
+    "BEI_PROXY": "期待インフレ(BEI近似)",
+    "REAL_YIELD_PROXY": "実質金利(近似)",
+    "GOLD_SILVER": "金銀レシオ",
+}
+
+
+def label_ja(code: str) -> str:
+    """Japanese label for a factor code, falling back to the code itself."""
+    return FACTOR_LABELS_JA.get(code, code)

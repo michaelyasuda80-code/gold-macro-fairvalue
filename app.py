@@ -1,7 +1,7 @@
-"""Streamlit dashboard: Gold fair-value vs market, with macro contribution.
+"""Streamlit ダッシュボード: 金のマクロ理論値 vs 実勢、寄与度分解つき。
 
-Run locally:   streamlit run app.py
-Deploy:        https://share.streamlit.io  (point at this repo, branch, app.py)
+ローカル実行:  streamlit run app.py
+デプロイ:      https://share.streamlit.io （このリポジトリ / branch / app.py を指定）
 """
 from __future__ import annotations
 
@@ -15,77 +15,113 @@ import data as D
 import model as M
 
 st.set_page_config(
-    page_title="Gold Macro Fair Value",
+    page_title="金マクロ理論値ダッシュボード",
     page_icon="🪙",
     layout="wide",
 )
 
 
-# ---------------- caching ----------------
+# ---------------- キャッシュ ----------------
 
-@st.cache_data(ttl=60 * 60 * 6, show_spinner="Fetching market data…")
+@st.cache_data(ttl=60 * 60 * 6, show_spinner="市場データを取得中…")
 def load_panel(start: str) -> pd.DataFrame:
     raw = D.build_panel(start=start)
     return D.add_engineered(raw)
 
 
-@st.cache_data(ttl=60 * 60 * 6, show_spinner="Computing rolling betas…")
+@st.cache_data(ttl=60 * 60 * 6, show_spinner="ローリングβを計算中…")
 def cached_rolling_beta(start: str, factors: tuple[str, ...], window: int) -> pd.DataFrame:
-    # start is part of the cache key so a wider window invalidates correctly.
     panel = load_panel(start)
     return M.rolling_beta(panel, D.GOLD_TICKER, list(factors), window=window)
 
 
-# ---------------- sidebar ----------------
+def jp(codes):
+    """factorコード（単体orリスト）を日本語ラベルへ。"""
+    if isinstance(codes, str):
+        return D.label_ja(codes)
+    return [D.label_ja(c) for c in codes]
 
-st.sidebar.title("Settings")
+
+# ---------------- 解釈文の自動生成 ----------------
+
+def build_narrative(summ: dict, attr: pd.DataFrame, z: float, lb_label: str) -> str:
+    actual = summ["actual_change_pct"]
+    fair = summ["fair_change_pct"]
+    unexp = actual - fair
+
+    pos = attr[attr["contrib_pts"] > 0].sort_values("contrib_pts", ascending=False).head(2)
+    neg = attr[attr["contrib_pts"] < 0].sort_values("contrib_pts").head(2)
+    pos_txt = "、".join(f"{jp(i)}({r.contrib_pts:+.1f}pt)" for i, r in pos.iterrows()) or "なし"
+    neg_txt = "、".join(f"{jp(i)}({r.contrib_pts:+.1f}pt)" for i, r in neg.iterrows()) or "なし"
+
+    if unexp < 0:
+        flow = f"差の {unexp:+.1f}%（未説明分）は、マクロ要因では説明できない**金固有の売り**（現物・ETF・投機筋フロー等）と読めます。"
+    elif unexp > 0:
+        flow = f"差の {unexp:+.1f}%（未説明分）は、マクロでは説明できない**金固有の買い**（逃避・実需・中銀等）と読めます。"
+    else:
+        flow = "実勢と理論値はほぼ一致しており、マクロでほぼ説明できています。"
+
+    if z > 2:
+        zt = f"残差zスコアは **{z:+.2f}σ** で、統計的に **割高**（理論値より高い）圏です。"
+    elif z < -2:
+        zt = f"残差zスコアは **{z:+.2f}σ** で、統計的に **割安**（理論値より安い）圏です。"
+    elif z >= 1:
+        zt = f"残差zスコアは **{z:+.2f}σ** で、やや割高寄りですが中立圏です。"
+    elif z <= -1:
+        zt = f"残差zスコアは **{z:+.2f}σ** で、やや割安寄りですが中立圏です。"
+    else:
+        zt = f"残差zスコアは **{z:+.2f}σ** で、ほぼ理論値どおり（中立）です。"
+
+    return (
+        f"**直近{lb_label}**、金は実勢で **{actual:+.1f}%** 動きました。"
+        f"マクロ理論値は **{fair:+.1f}%** を示唆しています。{flow}\n\n"
+        f"- 理論値を**押し上げた**主因：{pos_txt}\n"
+        f"- 理論値を**押し下げた**主因：{neg_txt}\n\n"
+        f"{zt}"
+    )
+
+
+# ---------------- サイドバー ----------------
+
+st.sidebar.title("設定")
 
 start_choice = st.sidebar.selectbox(
-    "History window",
+    "期間",
     options=["2018-01-01", "2015-01-01", "2010-01-01"],
     index=0,
 )
 
-available_factors = list(D.DEFAULT_FACTORS)
 factors = st.sidebar.multiselect(
-    "Factors in fair-value model",
-    options=[
-        "REAL_YIELD_PROXY", "^TNX", "^FVX", "^TYX",
-        "DX-Y.NYB", "JPY=X", "EURUSD=X", "CNY=X",
-        "CL=F", "BZ=F", "HG=F", "SI=F", "NG=F",
-        "^VIX", "^GSPC", "EEM",
-        "BTC-USD",
-        "TIP", "IEF", "TLT",
-        "BEI_PROXY",
-    ],
-    default=available_factors,
-    help="Curated default avoids multicollinearity. Add/remove freely.",
+    "モデルに使うマクロファクター",
+    options=list(D.ALL_FACTORS),
+    default=list(D.DEFAULT_FACTORS),
+    format_func=D.label_ja,
+    help="既定はマルチコリニアリティを抑えた推奨セット。自由に増減できます。",
 )
 
-zwin = st.sidebar.slider("Residual z-score window (days)", 30, 252, 126, step=10)
-roll_win = st.sidebar.slider("Rolling-beta window (days)", 60, 504, 252, step=20)
+zwin = st.sidebar.slider("残差zスコアの窓（日）", 30, 252, 126, step=10)
+roll_win = st.sidebar.slider("ローリングβの窓（日）", 60, 504, 252, step=20)
 baseline_choice = st.sidebar.radio(
-    "Contribution baseline",
+    "寄与の基準",
     options=["mean", "1y_ago"],
+    format_func=lambda x: "長期平均" if x == "mean" else "1年前",
     horizontal=True,
 )
 
 st.sidebar.markdown("---")
 st.sidebar.caption(
-    "Data: Yahoo Finance (delayed). Real yield is a proxy built from "
-    "10Y nominal minus a TIP/IEF-derived breakeven. For research/education "
-    "only — not investment advice."
+    "データ：Yahoo Finance（遅延あり）。実質金利は「米10年金利 − 期待インフレ近似」"
+    "で構築したプロキシです。リサーチ・教育目的であり、投資助言ではありません。"
 )
 
 
-# ---------------- fetch + fit ----------------
+# ---------------- 取得 + 推定 ----------------
 
 panel = load_panel(start_choice)
 
-# Guard: drop factors not in panel (e.g. data-fetch hiccup)
 factors = [f for f in factors if f in panel.columns]
 if not factors:
-    st.error("No factors available — try a wider history window.")
+    st.error("有効なファクターがありません。期間を広げるか、ファクターを選び直してください。")
     st.stop()
 
 fit = M.fit_ols(panel, D.GOLD_TICKER, factors)
@@ -93,35 +129,90 @@ mp = M.mispricing(panel, fit, D.GOLD_TICKER)
 contrib = M.contribution_breakdown(fit, panel, D.GOLD_TICKER, baseline=baseline_choice)
 
 
-# ---------------- header KPIs ----------------
+# ---------------- ヘッダー KPI ----------------
 
-st.title("🪙 Gold Macro Fair Value")
+st.title("🪙 金（ドル建て）マクロ理論値ダッシュボード")
 st.caption(
-    f"Last data: **{panel.index[-1].date()}**  ·  "
-    f"R² of fit: **{fit.r2:.3f}**  ·  factors: **{len(factors)}**"
+    f"最新データ：**{panel.index[-1].date()}**　·　"
+    f"決定係数 R²：**{fit.r2:.3f}**　·　ファクター数：**{len(factors)}**"
 )
 
 latest = mp.iloc[-1]
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Spot (GC=F)", f"${latest.actual:,.0f}")
-c2.metric("Fair value", f"${latest.fair:,.0f}",
-          delta=f"{latest.resid_pct:+.2f}% rich" if latest.resid_pct > 0 else f"{latest.resid_pct:+.2f}% cheap")
-c3.metric("Z-score", f"{latest.z:+.2f} σ",
-          help="Residual z-score. |z|>2 = potential mispricing")
-signal = "🔴 RICH" if latest.z > 2 else "🟢 CHEAP" if latest.z < -2 else "⚪ NEUTRAL"
-c4.metric("Signal (|z|>2)", signal)
+c1.metric("現値（金先物）", f"${latest.actual:,.0f}")
+c2.metric("理論値（フェアバリュー）", f"${latest.fair:,.0f}",
+          delta=f"{latest.resid_pct:+.2f}% 割高" if latest.resid_pct > 0 else f"{latest.resid_pct:+.2f}% 割安")
+c3.metric("残差zスコア", f"{latest.z:+.2f} σ",
+          help="|z|>2 で統計的な割高・割安の目安")
+signal = "🔴 割高" if latest.z > 2 else "🟢 割安" if latest.z < -2 else "⚪ 中立"
+c4.metric("シグナル（|z|>2）", signal)
 
 
-# ---------------- chart 1: actual vs fair + residual ----------------
+# ---------------- 期間選択（解釈と寄与で共有） ----------------
 
-st.subheader("Spot vs Fair value, and residual z-score")
+st.subheader("なぜ金は動いたのか — 変化の寄与度分解")
+
+lb_label = st.radio(
+    "対象期間",
+    options=["1W", "1M", "3M", "6M", "1Y"],
+    index=1, horizontal=True,
+    format_func=lambda x: {"1W": "1週間", "1M": "1ヶ月", "3M": "3ヶ月",
+                           "6M": "6ヶ月", "1Y": "1年"}[x],
+)
+lb_days = {"1W": 5, "1M": 21, "3M": 63, "6M": 126, "1Y": 252}[lb_label]
+lb_jp = {"1W": "1週間", "1M": "1ヶ月", "3M": "3ヶ月", "6M": "6ヶ月", "1Y": "1年"}[lb_label]
+
+attr, summ = M.change_attribution(fit, panel, D.GOLD_TICKER, lookback=lb_days)
+
+
+# ---------------- 解釈パネル（自動文章） ----------------
+
+st.info(build_narrative(summ, attr, float(latest.z), lb_jp))
+
+s1, s2, s3 = st.columns(3)
+s1.metric(f"実勢の変化（{lb_jp}）", f"{summ['actual_change_pct']:+.2f}%")
+s2.metric("理論値の変化", f"{summ['fair_change_pct']:+.2f}%")
+s3.metric("未説明分（残差）",
+          f"{summ['actual_change_pct'] - summ['fair_change_pct']:+.2f}%",
+          help="実勢 − 理論。大きいほど金固有の（マクロ外の）動き。")
+
+wfall = go.Figure(go.Bar(
+    x=attr["contrib_pts"],
+    y=jp(list(attr.index)),
+    orientation="h",
+    marker_color=["#d62728" if v < 0 else "#2ca02c" for v in attr["contrib_pts"]],
+    text=[f"{v:+.2f}" for v in attr["contrib_pts"]],
+    textposition="auto",
+))
+wfall.update_layout(
+    height=max(280, 44 * len(attr)),
+    xaxis_title=f"理論値への寄与（{lb_jp}・%ポイント／合計＝理論値の変化）",
+    margin=dict(l=10, r=10, t=10, b=30),
+)
+st.plotly_chart(wfall, use_container_width=True)
+
+with st.expander("水準ベースの寄与（長期基準との比較・上級者向け）"):
+    st.caption("今日の理論値『水準』を基準（長期平均 or 1年前）との差に分解します。"
+               "トレンドのある資産（S&P・BTC）が大きく出るため、日々の物語は上の"
+               "『変化の分解』を参照してください。")
+    contrib_disp = contrib.copy()
+    contrib_disp.index = jp(list(contrib_disp.index))
+    st.dataframe(contrib_disp.style.format({
+        "beta": "{:+.4f}", "x_now": "{:.4f}", "x_base": "{:.4f}",
+        "contrib_log": "{:+.4f}", "contrib_pct": "{:+.2f}%",
+    }), use_container_width=True)
+
+
+# ---------------- チャート1: 実勢 vs 理論値 + 残差 ----------------
+
+st.subheader("現値 vs 理論値、そして残差zスコア")
 fig = make_subplots(
     rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
     row_heights=[0.65, 0.35],
 )
-fig.add_trace(go.Scatter(x=mp.index, y=mp.actual, name="Spot", line=dict(width=2)), row=1, col=1)
-fig.add_trace(go.Scatter(x=mp.index, y=mp.fair, name="Fair value", line=dict(width=2, dash="dash")), row=1, col=1)
-fig.add_trace(go.Scatter(x=mp.index, y=mp.z, name="Z-score", line=dict(width=1.5)), row=2, col=1)
+fig.add_trace(go.Scatter(x=mp.index, y=mp.actual, name="現値", line=dict(width=2)), row=1, col=1)
+fig.add_trace(go.Scatter(x=mp.index, y=mp.fair, name="理論値", line=dict(width=2, dash="dash")), row=1, col=1)
+fig.add_trace(go.Scatter(x=mp.index, y=mp.z, name="zスコア", line=dict(width=1.5)), row=2, col=1)
 fig.add_hline(y=2, line=dict(dash="dot", width=1, color="red"), row=2, col=1)
 fig.add_hline(y=-2, line=dict(dash="dot", width=1, color="green"), row=2, col=1)
 fig.add_hline(y=0, line=dict(width=1, color="gray"), row=2, col=1)
@@ -135,96 +226,54 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 
-# ---------------- chart 2: change attribution (why did gold move?) ----------------
+# ---------------- チャート3: ローリングβ ----------------
 
-st.subheader("Why did gold move? — change attribution")
-
-lb_label = st.radio(
-    "Lookback",
-    options=["1W", "1M", "3M", "6M", "1Y"],
-    index=1, horizontal=True,
-)
-lb_days = {"1W": 5, "1M": 21, "3M": 63, "6M": 126, "1Y": 252}[lb_label]
-
-attr, summ = M.change_attribution(fit, panel, D.GOLD_TICKER, lookback=lb_days)
-
-s1, s2, s3 = st.columns(3)
-s1.metric(f"Actual move ({lb_label})", f"{summ['actual_change_pct']:+.2f}%")
-s2.metric("Model-implied move", f"{summ['fair_change_pct']:+.2f}%")
-s3.metric("Unexplained (residual)",
-          f"{summ['actual_change_pct'] - summ['fair_change_pct']:+.2f}%",
-          help="Actual minus model. Large unexplained move = potential mispricing.")
-
-wfall = go.Figure(go.Bar(
-    x=attr["contrib_pts"],
-    y=attr.index,
-    orientation="h",
-    marker_color=["#d62728" if v < 0 else "#2ca02c" for v in attr["contrib_pts"]],
-    text=[f"{v:+.2f}" for v in attr["contrib_pts"]],
-    textposition="auto",
-))
-wfall.update_layout(
-    height=max(280, 44 * len(attr)),
-    xaxis_title=f"Push on fair value over {lb_label} (percentage points; sums to model-implied move)",
-    margin=dict(l=10, r=10, t=10, b=30),
-)
-st.plotly_chart(wfall, use_container_width=True)
-
-with st.expander("Level contribution vs long-run baseline (advanced)"):
-    st.caption("Decomposes today's fair-value *level* vs the chosen baseline. "
-               "Trending assets (S&P, BTC) dominate here — use the change view above "
-               "for the day-to-day story.")
-    st.dataframe(contrib.style.format({
-        "beta": "{:+.4f}", "x_now": "{:.4f}", "x_base": "{:.4f}",
-        "contrib_log": "{:+.4f}", "contrib_pct": "{:+.2f}%",
-    }), use_container_width=True)
-
-
-# ---------------- chart 3: rolling beta ----------------
-
-st.subheader(f"Rolling betas ({roll_win}-day window)")
+st.subheader(f"ローリングβ（{roll_win}日窓）— マクロ感応度の推移")
 
 rb = cached_rolling_beta(start_choice, tuple(factors), roll_win)
 
 rb_fig = go.Figure()
 for col in [c for c in rb.columns if c != "const"]:
-    rb_fig.add_trace(go.Scatter(x=rb.index, y=rb[col], name=col, mode="lines"))
+    rb_fig.add_trace(go.Scatter(x=rb.index, y=rb[col], name=jp(col), mode="lines"))
 rb_fig.update_layout(
     height=420, hovermode="x unified",
-    yaxis_title="beta",
+    yaxis_title="β（感応度）",
     legend=dict(orientation="h", y=1.1),
 )
 st.plotly_chart(rb_fig, use_container_width=True)
 
 
-# ---------------- chart 4: correlation heatmap ----------------
+# ---------------- チャート4: 相関ヒートマップ ----------------
 
-st.subheader("Daily-change correlation (last 252 days)")
+st.subheader("日次変化の相関（直近252日）")
 ret = panel[[D.GOLD_TICKER, *factors]].diff().tail(252)
 corr = ret.corr()
+labels = jp(list(corr.columns))
 heat = go.Figure(data=go.Heatmap(
-    z=corr.values, x=corr.columns, y=corr.index,
+    z=corr.values, x=labels, y=labels,
     colorscale="RdBu", zmin=-1, zmax=1,
     text=corr.round(2).values, texttemplate="%{text}",
 ))
-heat.update_layout(height=480, margin=dict(l=10, r=10, t=10, b=10))
+heat.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=10))
 st.plotly_chart(heat, use_container_width=True)
 
 
-# ---------------- footer ----------------
+# ---------------- フッター ----------------
 
-with st.expander("Methodology"):
+with st.expander("計算方法（メソドロジー）"):
     st.markdown("""
-**Model.** OLS on price levels: `log(GC=F) = α + Σ βᵢ · xᵢ + ε`.
-Most factors are log-prices; rates are in percent. The real-yield proxy is
-`10Y nominal − 100 × centered(log(TIP) − log(IEF))`, which tracks FRED's
-`DFII10` series closely enough for direction-finding.
+**モデル.** 価格水準のOLS回帰： `log(金) = α + Σ βᵢ · xᵢ + ε`。
+多くのファクターは対数価格、金利は%。実質金利プロキシは
+`米10年金利 − 100 × 期待インフレ近似の偏差`（TIP/IEFから構築）で、
+方向性の判断には十分な近似です。
 
-**Mispricing.** Residual ε in log space ≈ % deviation. Z-score on a rolling
-window normalizes for regime-dependent residual volatility. |z| > 2 is the
-conventional statistical-arbitrage threshold.
+**ミスプライス.** 対数空間の残差 ε ≒ %乖離。ローリング窓でzスコア化し、
+レジーム依存の残差ボラを正規化します。|z| > 2 が統計的裁定の慣習的しきい値。
 
-**Caveats.** OLS levels can be spurious if series aren't cointegrated; use the
-rolling-beta panel to sanity-check stability. Yahoo data has occasional gaps
-on futures contracts around roll dates.
+**変化の寄与.** 各ファクターの変化 × β で、理論値の変化を要因分解します。
+合計＋未説明分（残差の変化）が実勢の変化に一致します。
+
+**注意.** 系列が共和分でない場合、水準OLSは見せかけの回帰になりえます。
+ローリングβで関係の安定性を確認してください。Yahooの先物はロール日付近で
+データに段差が出ることがあります。投資助言ではありません。
 """)
