@@ -219,3 +219,54 @@ FACTOR_LABELS_JA: dict[str, str] = {
 def label_ja(code: str) -> str:
     """Japanese label for a factor code, falling back to the code itself."""
     return FACTOR_LABELS_JA.get(code, code)
+
+
+# ---------------- Assets (multi-asset dashboard) ----------------
+
+@dataclass(frozen=True)
+class Asset:
+    key: str                          # internal id, also widget-key namespace
+    target: str                       # ticker to explain
+    name: str                         # Japanese display name
+    unit: str                         # price unit for axes
+    icon: str                         # emoji for the tab
+    default_factors: tuple[str, ...]  # model default
+    exclude: tuple[str, ...]          # factors not offered (self / circular)
+    price_decimals: int = 0
+
+
+# Crude oil drivers: dollar (-), copper/equities/EM/China (global demand, +),
+# vol & credit (risk appetite / financial conditions), 10Y nominal (growth, +).
+# Brent/gasoline are excluded as they ARE crude (circular, spurious R²≈0.99).
+OIL_DEFAULT_FACTORS: tuple[str, ...] = (
+    "DX-Y.NYB",
+    "HG=F",
+    "^GSPC",
+    "EEM",
+    "FXI",
+    "^VIX",
+    "^TNX",
+    "CREDIT_PROXY",
+)
+
+OIL_TICKER = "CL=F"
+
+ASSETS: dict[str, Asset] = {
+    "gold": Asset(
+        key="gold", target="GC=F", name="金", unit="USD/oz", icon="🪙",
+        default_factors=DEFAULT_FACTORS,
+        exclude=("GC=F", "GOLD_SILVER"),
+        price_decimals=0,
+    ),
+    "oil": Asset(
+        key="oil", target="CL=F", name="原油(WTI)", unit="USD/bbl", icon="🛢️",
+        default_factors=OIL_DEFAULT_FACTORS,
+        exclude=("CL=F", "BZ=F", "GOLD_SILVER"),
+        price_decimals=1,
+    ),
+}
+
+
+def factor_options(asset: Asset) -> list[str]:
+    """Selectable factors for an asset: everything except its excludes/target."""
+    return [f for f in ALL_FACTORS if f not in asset.exclude and f != asset.target]
