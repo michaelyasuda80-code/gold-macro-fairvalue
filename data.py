@@ -233,6 +233,8 @@ class Asset:
     default_factors: tuple[str, ...]  # model default
     exclude: tuple[str, ...]          # factors not offered (self / circular)
     price_decimals: int = 0
+    price_prefix: str = "$"           # currency symbol before the number
+    price_suffix: str = ""            # unit after the number (e.g. 円)
 
 
 # Crude oil drivers: dollar (-), copper/equities/EM/China (global demand, +),
@@ -251,6 +253,19 @@ OIL_DEFAULT_FACTORS: tuple[str, ...] = (
 
 OIL_TICKER = "CL=F"
 
+# USD/JPY drivers: US rates front+long (rate differential; JGB unavailable on
+# Yahoo so the US leg is the proxy), risk/safe-haven (VIX, S&P), oil (Japan is
+# an energy importer → terms of trade), credit (financial conditions).
+# DXY/EUR are excluded: explaining one USD pair with broad-USD is ~circular.
+JPY_DEFAULT_FACTORS: tuple[str, ...] = (
+    "^TNX",
+    "^IRX",
+    "^VIX",
+    "^GSPC",
+    "CL=F",
+    "CREDIT_PROXY",
+)
+
 ASSETS: dict[str, Asset] = {
     "gold": Asset(
         key="gold", target="GC=F", name="金", unit="USD/oz", icon="🪙",
@@ -263,6 +278,12 @@ ASSETS: dict[str, Asset] = {
         default_factors=OIL_DEFAULT_FACTORS,
         exclude=("CL=F", "BZ=F", "GOLD_SILVER"),
         price_decimals=1,
+    ),
+    "jpy": Asset(
+        key="jpy", target="JPY=X", name="ドル円", unit="円/ドル", icon="💴",
+        default_factors=JPY_DEFAULT_FACTORS,
+        exclude=("JPY=X", "DX-Y.NYB", "EURUSD=X", "CNY=X", "GOLD_SILVER"),
+        price_decimals=1, price_prefix="", price_suffix="円",
     ),
 }
 

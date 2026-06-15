@@ -125,7 +125,7 @@ def render_dashboard(cfg: D.Asset):
     contrib = M.contribution_breakdown(fit, panel, cfg.target, baseline=baseline_choice)
 
     def price(v):
-        return f"${v:,.{cfg.price_decimals}f}"
+        return f"{cfg.price_prefix}{v:,.{cfg.price_decimals}f}{cfg.price_suffix}"
 
     # --- KPI ---
     st.caption(
@@ -239,11 +239,13 @@ st.sidebar.caption(
     "データ：Yahoo Finance（遅延あり）。リサーチ・教育目的であり、投資助言ではありません。"
 )
 
-tab_gold, tab_oil = st.tabs(["🪙 金", "🛢️ 原油(WTI)"])
+tab_gold, tab_oil, tab_jpy = st.tabs(["🪙 金", "🛢️ 原油(WTI)", "💴 ドル円"])
 with tab_gold:
     render_dashboard(D.ASSETS["gold"])
 with tab_oil:
     render_dashboard(D.ASSETS["oil"])
+with tab_jpy:
+    render_dashboard(D.ASSETS["jpy"])
 
 with st.expander("計算方法（メソドロジー）"):
     st.markdown("""
