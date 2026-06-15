@@ -42,6 +42,8 @@ UNIVERSE: tuple[Series, ...] = (
     Series("TIP", "TIPS ETF (real-yield proxy, inverse)", "rates", "log"),
     Series("IEF", "7-10Y Treasury ETF", "rates", "log"),
     Series("TLT", "20+Y Treasury ETF", "rates", "log"),
+    Series("1482.T", "Japan JGB ETF (iShares Core; inverse of JP yield)",
+           "rates", "log", "Japan 10Y proxy; price up = JP yield down"),
     # --- Credit (risk appetite / financial conditions) ---
     Series("HYG", "High-yield corp bond ETF", "credit", "log"),
     Series("LQD", "Investment-grade corp bond ETF", "credit", "log"),
@@ -119,9 +121,12 @@ def build_panel(universe: Iterable[Series] = UNIVERSE,
                 continue
             cols.append(t)
     panel = pd.concat(cols, axis=1)
-    # Drop any column that is mostly empty, then drop rows with gaps.
-    keep = [c for c in panel.columns if panel[c].notna().mean() > 0.5]
-    panel = panel[keep].dropna(how="any")
+    # Keep columns that have a reasonable amount of history, but DON'T drop rows
+    # globally: a late-starting series (e.g. a 2018+ JGB ETF) must not truncate
+    # history for other assets. Each model applies its own dropna on just the
+    # columns it uses (see model.fit_ols etc.), so leading NaNs are harmless.
+    keep = [c for c in panel.columns if panel[c].notna().mean() > 0.3]
+    panel = panel[keep].dropna(how="all")
     return panel
 
 
@@ -148,7 +153,9 @@ def add_engineered(panel: pd.DataFrame) -> pd.DataFrame:
     # Gold/Silver ratio (sentiment, not a driver — keep for cross-check)
     if "GC=F" in out and "SI=F" in out:
         out["GOLD_SILVER"] = out["GC=F"] - out["SI=F"]
-    return out.dropna(how="any")
+    # Keep NaNs (don't global-dropna): each model drops on its own columns, so
+    # one late-starting / engineered series can't shorten the others' history.
+    return out.dropna(how="all")
 
 
 # Default factor set used by the model. Curated for low multicollinearity.
@@ -167,7 +174,7 @@ DEFAULT_FACTORS: tuple[str, ...] = (
 ALL_FACTORS: tuple[str, ...] = (
     # rates / inflation
     "REAL_YIELD_PROXY", "BEI_PROXY", "^IRX", "^FVX", "^TNX", "^TYX",
-    "CURVE_10Y_5Y", "TIP", "IEF", "TLT",
+    "CURVE_10Y_5Y", "TIP", "IEF", "TLT", "1482.T",
     # usd / fx
     "DX-Y.NYB", "JPY=X", "EURUSD=X", "CNY=X",
     # credit
@@ -195,6 +202,7 @@ FACTOR_LABELS_JA: dict[str, str] = {
     "TIP": "TIPS ETF",
     "IEF": "米7-10年債ETF",
     "TLT": "米20年超債ETF",
+    "1482.T": "日本国債ETF(日本金利の逆)",
     "HYG": "ハイイールド債ETF",
     "LQD": "投資適格債ETF",
     "CREDIT_PROXY": "クレジット選好(HY/IG)",
@@ -253,13 +261,19 @@ OIL_DEFAULT_FACTORS: tuple[str, ...] = (
 
 OIL_TICKER = "CL=F"
 
-# USD/JPY drivers: US rates front+long (rate differential; JGB unavailable on
-# Yahoo so the US leg is the proxy), risk/safe-haven (VIX, S&P), oil (Japan is
-# an energy importer → terms of trade), credit (financial conditions).
-# DXY/EUR are excluded: explaining one USD pair with broad-USD is ~circular.
+# USD/JPY drivers (the rate-differential story, made explicit):
+#   ^TNX/^IRX  = US long & front-end yields (US leg of the differential)
+#   1482.T     = Japan JGB ETF (Japan leg; price up = JP yield down)
+#   EURUSD=X   = broad-dollar strength via a clean single pair
+#   ^VIX,^GSPC = risk-off / safe-haven & carry
+#   CL=F       = oil; Japan is an energy importer → terms of trade
+#   CREDIT_PROXY = financial conditions
+# DXY/CNY stay excluded (broad-USD / another USD pair = more circular than EUR).
 JPY_DEFAULT_FACTORS: tuple[str, ...] = (
     "^TNX",
     "^IRX",
+    "1482.T",
+    "EURUSD=X",
     "^VIX",
     "^GSPC",
     "CL=F",
@@ -282,7 +296,7 @@ ASSETS: dict[str, Asset] = {
     "jpy": Asset(
         key="jpy", target="JPY=X", name="ドル円", unit="円/ドル", icon="💴",
         default_factors=JPY_DEFAULT_FACTORS,
-        exclude=("JPY=X", "DX-Y.NYB", "EURUSD=X", "CNY=X", "GOLD_SILVER"),
+        exclude=("JPY=X", "DX-Y.NYB", "CNY=X", "GOLD_SILVER"),
         price_decimals=1, price_prefix="", price_suffix="円",
     ),
 }
