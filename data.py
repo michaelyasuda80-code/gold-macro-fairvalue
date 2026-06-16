@@ -93,6 +93,35 @@ def fetch_raw(tickers: Iterable[str], start: str = "2015-01-01",
     return out
 
 
+def fetch_jgb10y() -> pd.Series:
+    """Japan 10Y JGB yield (%) from the Ministry of Finance (official, free,
+    no key). Combines the all-history file with the current-year file so the
+    latest weeks aren't missing. Returns an empty Series on any failure so the
+    rest of the app still works without it.
+    """
+    import io
+    import urllib.request
+
+    base = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/"
+    frames = []
+    for u in (base + "historical/jgbcme_all.csv", base + "jgbcme.csv"):
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+            txt = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
+            df = pd.read_csv(io.StringIO(txt), skiprows=1)
+            dt = pd.to_datetime(df["Date"], errors="coerce")
+            s = pd.to_numeric(df["10Y"], errors="coerce")
+            s.index = dt
+            frames.append(s.dropna())
+        except Exception:
+            continue
+    if not frames:
+        return pd.Series(dtype="float64", name="JP10Y")
+    out = pd.concat(frames)
+    out = out[~out.index.duplicated(keep="last")].sort_index()
+    return out.rename("JP10Y")
+
+
 def transform(series_def: Series, raw: pd.Series) -> pd.Series:
     """Apply per-series transform to make it model-ready."""
     s = raw.copy()
@@ -127,6 +156,12 @@ def build_panel(universe: Iterable[Series] = UNIVERSE,
     # columns it uses (see model.fit_ols etc.), so leading NaNs are harmless.
     keep = [c for c in panel.columns if panel[c].notna().mean() > 0.3]
     panel = panel[keep].dropna(how="all")
+    # Join the official Japan 10Y JGB yield (non-Yahoo source). Aligned to the
+    # panel's calendar and forward-filled across JP/US holiday mismatches.
+    jgb = fetch_jgb10y()
+    if not jgb.empty:
+        panel = panel.join(jgb)
+        panel["JP10Y"] = panel["JP10Y"].ffill()
     return panel
 
 
@@ -150,6 +185,9 @@ def add_engineered(panel: pd.DataFrame) -> pd.DataFrame:
     # Yield-curve slope (10Y - 5Y), a growth/term-premium signal.
     if "^TNX" in out and "^FVX" in out:
         out["CURVE_10Y_5Y"] = out["^TNX"] - out["^FVX"]
+    # US–Japan 10Y rate differential (the textbook USD/JPY driver), in % points.
+    if "^TNX" in out and "JP10Y" in out:
+        out["US_JP_10Y_DIFF"] = out["^TNX"] - out["JP10Y"]
     # Gold/Silver ratio (sentiment, not a driver — keep for cross-check)
     if "GC=F" in out and "SI=F" in out:
         out["GOLD_SILVER"] = out["GC=F"] - out["SI=F"]
@@ -174,7 +212,7 @@ DEFAULT_FACTORS: tuple[str, ...] = (
 ALL_FACTORS: tuple[str, ...] = (
     # rates / inflation
     "REAL_YIELD_PROXY", "BEI_PROXY", "^IRX", "^FVX", "^TNX", "^TYX",
-    "CURVE_10Y_5Y", "TIP", "IEF", "TLT", "1482.T",
+    "CURVE_10Y_5Y", "JP10Y", "US_JP_10Y_DIFF", "TIP", "IEF", "TLT", "1482.T",
     # usd / fx
     "DX-Y.NYB", "JPY=X", "EURUSD=X", "CNY=X",
     # credit
@@ -199,6 +237,8 @@ FACTOR_LABELS_JA: dict[str, str] = {
     "^TNX": "米10年金利",
     "^TYX": "米30年金利",
     "CURVE_10Y_5Y": "利回り曲線(10年-5年)",
+    "JP10Y": "日本10年金利(財務省)",
+    "US_JP_10Y_DIFF": "日米10年金利差",
     "TIP": "TIPS ETF",
     "IEF": "米7-10年債ETF",
     "TLT": "米20年超債ETF",
@@ -262,17 +302,20 @@ OIL_DEFAULT_FACTORS: tuple[str, ...] = (
 OIL_TICKER = "CL=F"
 
 # USD/JPY drivers (the rate-differential story, made explicit):
-#   ^TNX/^IRX  = US long & front-end yields (US leg of the differential)
-#   1482.T     = Japan JGB ETF (Japan leg; price up = JP yield down)
+#   ^TNX + JP10Y = US & Japan 10Y yields, the two legs of the differential
+#                  (JP10Y is the official MOF yield, not the ETF proxy)
+#   ^IRX       = US front-end / policy
 #   EURUSD=X   = broad-dollar strength via a clean single pair
 #   ^VIX,^GSPC = risk-off / safe-haven & carry
 #   CL=F       = oil; Japan is an energy importer → terms of trade
 #   CREDIT_PROXY = financial conditions
+# Two separate legs fit better than a single forced differential; the explicit
+# US_JP_10Y_DIFF factor is also offered for users who prefer one clean driver.
 # DXY/CNY stay excluded (broad-USD / another USD pair = more circular than EUR).
 JPY_DEFAULT_FACTORS: tuple[str, ...] = (
     "^TNX",
+    "JP10Y",
     "^IRX",
-    "1482.T",
     "EURUSD=X",
     "^VIX",
     "^GSPC",
