@@ -376,6 +376,8 @@ class Asset:
     #                                   benchmark spread panel, e.g. WTI vs Brent
     context: tuple = ()               # (column, label) extra context series to
     #                                   plot under the price, e.g. trade balance
+    news_tickers: tuple = ()          # tickers for English (yfinance) news
+    news_query: str = ""              # keyword for Japanese (Google News) news
 
 
 # Crude oil drivers. Demand/financial side kept lean (one broad equity proxy)
@@ -425,6 +427,7 @@ ASSETS: dict[str, Asset] = {
         default_factors=DEFAULT_FACTORS,
         exclude=("GC=F", "GOLD_SILVER"),
         price_decimals=0,
+        news_tickers=("GC=F",), news_query="金 価格 相場",
     ),
     "oil": Asset(
         key="oil", target="CL=F", name="原油(WTI)", unit="USD/bbl", icon="🛢️",
@@ -432,6 +435,7 @@ ASSETS: dict[str, Asset] = {
         exclude=("CL=F", "BZ=F", "GOLD_SILVER"),
         price_decimals=1,
         crosscheck=("BZ=F", "Brent"),
+        news_tickers=("CL=F", "BZ=F"), news_query="原油 WTI 相場",
     ),
     "jpy": Asset(
         key="jpy", target="JPY=X", name="ドル円", unit="円/ドル", icon="💴",
@@ -439,6 +443,7 @@ ASSETS: dict[str, Asset] = {
         exclude=("JPY=X", "DX-Y.NYB", "CNY=X", "GOLD_SILVER"),
         price_decimals=1, price_prefix="", price_suffix="円",
         context=("TRADE_BAL_12M", "日本の貿易収支(12ヶ月累計, 兆円)"),
+        news_tickers=("JPY=X",), news_query="ドル円 相場",
     ),
 }
 
@@ -446,3 +451,59 @@ ASSETS: dict[str, Asset] = {
 def factor_options(asset: Asset) -> list[str]:
     """Selectable factors for an asset: everything except its excludes/target."""
     return [f for f in ALL_FACTORS if f not in asset.exclude and f != asset.target]
+
+
+# ---------------- News (per asset) ----------------
+
+def fetch_yf_news(tickers: Iterable[str]) -> list[dict]:
+    """English news per ticker from Yahoo Finance (via yfinance, free)."""
+    items: list[dict] = []
+    for t in tickers:
+        try:
+            for n in (yf.Ticker(t).news or []):
+                c = n.get("content", n)
+                title = c.get("title")
+                link = (c.get("canonicalUrl") or c.get("clickThroughUrl") or {}) or {}
+                url = link.get("url") if isinstance(link, dict) else None
+                prov = c.get("provider") or {}
+                src = prov.get("displayName") if isinstance(prov, dict) else prov
+                ts = c.get("pubDate") or c.get("providerPublishTime")
+                tm = pd.to_datetime(ts, utc=True, errors="coerce")
+                if not title or not url or pd.isna(tm):
+                    continue
+                items.append({"time": tm, "title": title, "source": src or "Yahoo",
+                              "url": url, "lang": "EN"})
+        except Exception:
+            continue
+    return items
+
+
+def fetch_jp_news(query: str, limit: int = 15) -> list[dict]:
+    """Japanese news for a keyword via Google News RSS (free, asset-targeted;
+    surfaces Yahoo! News / Yahoo! Finance JP and other outlets)."""
+    import urllib.parse
+    import urllib.request
+    import xml.etree.ElementTree as ET
+
+    url = ("https://news.google.com/rss/search?q="
+           + urllib.parse.quote(query) + "&hl=ja&gl=JP&ceid=JP:ja")
+    out: list[dict] = []
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        raw = urllib.request.urlopen(req, timeout=20).read()
+        root = ET.fromstring(raw)
+        for it in root.findall(".//item")[:limit]:
+            title = it.findtext("title") or ""
+            link = it.findtext("link") or ""
+            pub = it.findtext("pubDate") or ""
+            src = "Google News"
+            if " - " in title:
+                title, src = title.rsplit(" - ", 1)
+            tm = pd.to_datetime(pub, utc=True, errors="coerce")
+            if not title or not link or pd.isna(tm):
+                continue
+            out.append({"time": tm, "title": title, "source": src,
+                        "url": link, "lang": "JP"})
+    except Exception:
+        pass
+    return out

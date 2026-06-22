@@ -43,6 +43,31 @@ def jp(codes):
     return [D.label_ja(c) for c in codes]
 
 
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def load_news(tickers: tuple[str, ...], query: str) -> list[dict]:
+    """English (yfinance) + Japanese (Google News) news, merged, newest first."""
+    items = D.fetch_yf_news(tickers) + (D.fetch_jp_news(query) if query else [])
+    items.sort(key=lambda x: x["time"], reverse=True)
+    seen, out = set(), []
+    for x in items:
+        key = x["title"][:48]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(x)
+    return out
+
+
+def rel_time(ts: pd.Timestamp) -> str:
+    """UTC timestamp -> '◯分前 / ◯時間前 / ◯日前'."""
+    mins = (pd.Timestamp.now(tz="UTC") - ts).total_seconds() / 60
+    if mins < 60:
+        return f"{int(max(mins, 0))}分前"
+    if mins < 60 * 24:
+        return f"{int(mins // 60)}時間前"
+    return f"{int(mins // (60 * 24))}日前"
+
+
 # ---------------- 解釈文の自動生成 ----------------
 
 def build_narrative(asset_name: str, summ: dict, attr: pd.DataFrame,
@@ -276,6 +301,22 @@ def render_dashboard(cfg: D.Asset):
                             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
                             margin=dict(t=30))
         st.plotly_chart(cxfig, use_container_width=True, key=f"{k}_ctx")
+
+    # --- 関連ニュース（英語=yfinance ＋ 日本語=Google News、新しい順） ---
+    if cfg.news_tickers or cfg.news_query:
+        st.subheader(f"📰 {cfg.name}の関連ニュース")
+        news = load_news(tuple(cfg.news_tickers), cfg.news_query)
+        if not news:
+            st.caption("ニュースを取得できませんでした（時間をおいて再表示されます）。")
+        else:
+            for it in news[:12]:
+                tag = "🇯🇵" if it["lang"] == "JP" else "🇺🇸"
+                st.markdown(
+                    f"{tag} `{rel_time(it['time'])}` · {it['source']}  \n"
+                    f"[{it['title']}]({it['url']})"
+                )
+            st.caption("出典：Yahoo! Finance（英語）／ Google ニュース日本語版"
+                       "（Yahoo!ニュース等を含む）。30分キャッシュ。")
 
 
 # ---------------- ページ全体 ----------------
