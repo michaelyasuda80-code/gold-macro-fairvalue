@@ -151,6 +151,43 @@ def fetch_oil_supply() -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
+def _fred_csv(sid: str) -> pd.Series:
+    """One FRED series via the key-free fredgraph CSV endpoint."""
+    import io
+    import urllib.request
+
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    txt = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
+    df = pd.read_csv(io.StringIO(txt))
+    df.columns = ["date", "v"]
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["v"] = pd.to_numeric(df["v"], errors="coerce")
+    return df.dropna().set_index("date")["v"].sort_index()
+
+
+def fetch_jpy_macro() -> dict:
+    """Japan balance-of-payments / policy structural series for USD/JPY, via the
+    key-free FRED CSV mirror. Monthly; forward-filled to the daily panel.
+      JP_POLICY    = BOJ policy proxy (overnight call money rate, %)
+      TRADE_BAL    = monthly net trade value (¥ trillion)
+      TRADE_BAL_12M= 12-month rolling sum (structural, smoother)
+    Returns whatever was fetched successfully (graceful on failure).
+    """
+    out = {}
+    try:
+        out["JP_POLICY"] = _fred_csv("IRSTCI01JPM156N")
+    except Exception:
+        pass
+    try:
+        tb = _fred_csv("XTNTVA01JPM664S") / 1e12
+        out["TRADE_BAL"] = tb
+        out["TRADE_BAL_12M"] = tb.rolling(12).sum()
+    except Exception:
+        pass
+    return out
+
+
 def transform(series_def: Series, raw: pd.Series) -> pd.Series:
     """Apply per-series transform to make it model-ready."""
     s = raw.copy()
@@ -197,6 +234,9 @@ def build_panel(universe: Iterable[Series] = UNIVERSE,
         panel = panel.join(supply)
         for c in supply.columns:
             panel[c] = panel[c].ffill()
+    # Japan structural series for USD/JPY (policy rate, trade balance).
+    for col, s in fetch_jpy_macro().items():
+        panel[col] = s.reindex(panel.index, method="ffill")
     return panel
 
 
@@ -223,6 +263,9 @@ def add_engineered(panel: pd.DataFrame) -> pd.DataFrame:
     # US–Japan 10Y rate differential (the textbook USD/JPY driver), in % points.
     if "^TNX" in out and "JP10Y" in out:
         out["US_JP_10Y_DIFF"] = out["^TNX"] - out["JP10Y"]
+    # US–Japan policy (front-end) rate differential, in % points.
+    if "^IRX" in out and "JP_POLICY" in out:
+        out["US_JP_POLICY_DIFF"] = out["^IRX"] - out["JP_POLICY"]
     # Gold/Silver ratio (sentiment, not a driver — keep for cross-check)
     if "GC=F" in out and "SI=F" in out:
         out["GOLD_SILVER"] = out["GC=F"] - out["SI=F"]
@@ -247,7 +290,10 @@ DEFAULT_FACTORS: tuple[str, ...] = (
 ALL_FACTORS: tuple[str, ...] = (
     # rates / inflation
     "REAL_YIELD_PROXY", "BEI_PROXY", "^IRX", "^FVX", "^TNX", "^TYX",
-    "CURVE_10Y_5Y", "JP10Y", "US_JP_10Y_DIFF", "TIP", "IEF", "TLT", "1482.T",
+    "CURVE_10Y_5Y", "JP10Y", "US_JP_10Y_DIFF", "JP_POLICY", "US_JP_POLICY_DIFF",
+    "TIP", "IEF", "TLT", "1482.T",
+    # japan balance of payments
+    "TRADE_BAL", "TRADE_BAL_12M",
     # usd / fx
     "DX-Y.NYB", "JPY=X", "EURUSD=X", "CNY=X",
     # credit
@@ -276,6 +322,10 @@ FACTOR_LABELS_JA: dict[str, str] = {
     "CURVE_10Y_5Y": "利回り曲線(10年-5年)",
     "JP10Y": "日本10年金利(財務省)",
     "US_JP_10Y_DIFF": "日米10年金利差",
+    "JP_POLICY": "日本政策金利(コール)",
+    "US_JP_POLICY_DIFF": "日米政策金利差",
+    "TRADE_BAL": "日本貿易収支(月次,兆円)",
+    "TRADE_BAL_12M": "日本貿易収支(12ヶ月累計,兆円)",
     "TIP": "TIPS ETF",
     "IEF": "米7-10年債ETF",
     "TLT": "米20年超債ETF",
@@ -324,6 +374,8 @@ class Asset:
     price_suffix: str = ""            # unit after the number (e.g. 円)
     crosscheck: tuple = ()            # (ticker, label) for a non-circular
     #                                   benchmark spread panel, e.g. WTI vs Brent
+    context: tuple = ()               # (column, label) extra context series to
+    #                                   plot under the price, e.g. trade balance
 
 
 # Crude oil drivers. Demand/financial side kept lean (one broad equity proxy)
@@ -344,26 +396,27 @@ OIL_DEFAULT_FACTORS: tuple[str, ...] = (
 
 OIL_TICKER = "CL=F"
 
-# USD/JPY drivers (the rate-differential story, made explicit):
-#   ^TNX + JP10Y = US & Japan 10Y yields, the two legs of the differential
-#                  (JP10Y is the official MOF yield, not the ETF proxy)
-#   ^IRX       = US front-end / policy
-#   EURUSD=X   = broad-dollar strength via a clean single pair
-#   ^VIX,^GSPC = risk-off / safe-haven & carry
-#   CL=F       = oil; Japan is an energy importer → terms of trade
-#   CREDIT_PROXY = financial conditions
-# Two separate legs fit better than a single forced differential; the explicit
-# US_JP_10Y_DIFF factor is also offered for users who prefer one clean driver.
-# DXY/CNY stay excluded (broad-USD / another USD pair = more circular than EUR).
+# USD/JPY drivers:
+#   ^TNX + JP10Y       = US & Japan 10Y yields (long-end of the differential)
+#   US_JP_POLICY_DIFF  = US 13w T-bill − BOJ call rate (policy/front-end diff)
+#   EURUSD=X           = broad-dollar strength via a clean single pair
+#   ^VIX,^GSPC         = risk-off / safe-haven & carry
+#   CL=F               = oil; Japan is an energy importer → terms of trade
+#   CREDIT_PROXY       = financial conditions
+#   TRADE_BAL          = Japan trade balance (structural BoP flow; small but
+#                        meaningful slow component — overlaps with oil so its
+#                        influence stays low by design)
+# DXY/CNY excluded (broad-USD / another USD pair = more circular than EUR).
 JPY_DEFAULT_FACTORS: tuple[str, ...] = (
     "^TNX",
     "JP10Y",
-    "^IRX",
+    "US_JP_POLICY_DIFF",
     "EURUSD=X",
     "^VIX",
     "^GSPC",
     "CL=F",
     "CREDIT_PROXY",
+    "TRADE_BAL",
 )
 
 ASSETS: dict[str, Asset] = {
@@ -385,6 +438,7 @@ ASSETS: dict[str, Asset] = {
         default_factors=JPY_DEFAULT_FACTORS,
         exclude=("JPY=X", "DX-Y.NYB", "CNY=X", "GOLD_SILVER"),
         price_decimals=1, price_prefix="", price_suffix="円",
+        context=("TRADE_BAL_12M", "日本の貿易収支(12ヶ月累計, 兆円)"),
     ),
 }
 

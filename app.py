@@ -254,6 +254,29 @@ def render_dashboard(cfg: D.Asset):
                             margin=dict(t=30))
         st.plotly_chart(ccfig, use_container_width=True, key=f"{k}_cc")
 
+    # --- コンテキスト: 構造要因（貿易収支など）を価格と並べて表示 ---
+    if cfg.context and cfg.context[0] in panel.columns:
+        ctx_col, ctx_label = cfg.context
+        st.subheader(f"構造の背景：{cfg.name} と {ctx_label}")
+        cx = panel[[cfg.target, ctx_col]].dropna()
+        st.caption(
+            "為替の長期の地合いを作る構造要因の参考表示です（日次の値動きは金利差・"
+            "リスク等が主役）。モデルにも小さな比重で組み込まれています。"
+        )
+        cxfig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
+                              row_heights=[0.6, 0.4])
+        cxfig.add_trace(go.Scatter(x=cx.index, y=np.exp(cx[cfg.target]),
+                                   name=cfg.name, line=dict(width=2)), row=1, col=1)
+        cxfig.add_trace(go.Scatter(x=cx.index, y=cx[ctx_col], name=ctx_label,
+                                   line=dict(width=1.8, color="#FFB300")), row=2, col=1)
+        cxfig.add_hline(y=0, line=dict(width=1, color="gray"), row=2, col=1)
+        cxfig.update_yaxes(title_text=cfg.unit, row=1, col=1)
+        cxfig.update_yaxes(title_text="兆円", row=2, col=1)
+        cxfig.update_layout(height=460, hovermode="x unified",
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                            margin=dict(t=30))
+        st.plotly_chart(cxfig, use_container_width=True, key=f"{k}_ctx")
+
 
 # ---------------- ページ全体 ----------------
 
