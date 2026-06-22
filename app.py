@@ -114,6 +114,13 @@ def build_narrative(asset_name: str, summ: dict, attr: pd.DataFrame,
 
 def render_dashboard(cfg: D.Asset):
     k = cfg.key  # ウィジェットキーの名前空間
+    # Read optional fields defensively: on Streamlit Cloud a freshly pushed
+    # app.py can briefly run against a not-yet-reloaded data.py module, so an
+    # Asset instance may lack newer fields. getattr keeps the app from crashing.
+    crosscheck = getattr(cfg, "crosscheck", ())
+    context = getattr(cfg, "context", ())
+    news_tickers = getattr(cfg, "news_tickers", ())
+    news_query = getattr(cfg, "news_query", "")
 
     with st.expander("⚙️ モデル設定（期間・ファクター・窓）", expanded=False):
         cset1, cset2 = st.columns([1, 2])
@@ -252,8 +259,8 @@ def render_dashboard(cfg: D.Asset):
     st.plotly_chart(heat, use_container_width=True, key=f"{k}_heat")
 
     # --- クロスチェック: ベンチマークとのスプレッド（循環しない参考） ---
-    if cfg.crosscheck and cfg.crosscheck[0] in panel.columns:
-        bench_t, bench_l = cfg.crosscheck
+    if crosscheck and crosscheck[0] in panel.columns:
+        bench_t, bench_l = crosscheck
         st.subheader(f"クロスチェック：{cfg.name} − {bench_l} スプレッド")
         cc = panel[[cfg.target, bench_t]].dropna()
         own = np.exp(cc[cfg.target]); bench = np.exp(cc[bench_t])
@@ -280,8 +287,8 @@ def render_dashboard(cfg: D.Asset):
         st.plotly_chart(ccfig, use_container_width=True, key=f"{k}_cc")
 
     # --- コンテキスト: 構造要因（貿易収支など）を価格と並べて表示 ---
-    if cfg.context and cfg.context[0] in panel.columns:
-        ctx_col, ctx_label = cfg.context
+    if context and context[0] in panel.columns:
+        ctx_col, ctx_label = context
         st.subheader(f"構造の背景：{cfg.name} と {ctx_label}")
         cx = panel[[cfg.target, ctx_col]].dropna()
         st.caption(
@@ -303,9 +310,9 @@ def render_dashboard(cfg: D.Asset):
         st.plotly_chart(cxfig, use_container_width=True, key=f"{k}_ctx")
 
     # --- 関連ニュース（英語=yfinance ＋ 日本語=Google News、新しい順） ---
-    if cfg.news_tickers or cfg.news_query:
+    if news_tickers or news_query:
         st.subheader(f"📰 {cfg.name}の関連ニュース")
-        news = load_news(tuple(cfg.news_tickers), cfg.news_query)
+        news = load_news(tuple(news_tickers), news_query)
         if not news:
             st.caption("ニュースを取得できませんでした（時間をおいて再表示されます）。")
         else:
