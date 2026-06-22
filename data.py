@@ -122,6 +122,35 @@ def fetch_jgb10y() -> pd.Series:
     return out.rename("JP10Y")
 
 
+def _eia_dnav(fname: str) -> pd.Series:
+    """Read one EIA dnav weekly .xls (no API key) into a dated Series."""
+    import io
+    import urllib.request
+
+    url = "https://www.eia.gov/dnav/pet/hist_xls/" + fname
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    raw = urllib.request.urlopen(req, timeout=30).read()
+    df = pd.read_excel(io.BytesIO(raw), sheet_name="Data 1", skiprows=2)
+    df.columns = ["date", "v"]
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["v"] = pd.to_numeric(df["v"], errors="coerce")
+    return df.dropna().set_index("date")["v"]
+
+
+def fetch_oil_supply() -> pd.DataFrame:
+    """US crude supply fundamentals from the EIA (official, free, no key):
+    commercial crude inventories and US field production. Returns log-levels so
+    they slot straight into the model. Empty frame on failure (graceful).
+    """
+    out = {}
+    for col, fname in (("INV_CRUDE", "WCESTUS1w.xls"), ("PROD_US", "WCRFPUS2w.xls")):
+        try:
+            out[col] = np.log(_eia_dnav(fname))
+        except Exception:
+            continue
+    return pd.DataFrame(out)
+
+
 def transform(series_def: Series, raw: pd.Series) -> pd.Series:
     """Apply per-series transform to make it model-ready."""
     s = raw.copy()
@@ -162,6 +191,12 @@ def build_panel(universe: Iterable[Series] = UNIVERSE,
     if not jgb.empty:
         panel = panel.join(jgb)
         panel["JP10Y"] = panel["JP10Y"].ffill()
+    # Oil supply fundamentals from EIA (crude inventory, US production).
+    supply = fetch_oil_supply()
+    if not supply.empty:
+        panel = panel.join(supply)
+        for c in supply.columns:
+            panel[c] = panel[c].ffill()
     return panel
 
 
@@ -217,6 +252,8 @@ ALL_FACTORS: tuple[str, ...] = (
     "DX-Y.NYB", "JPY=X", "EURUSD=X", "CNY=X",
     # credit
     "CREDIT_PROXY", "HYG", "LQD",
+    # supply (oil fundamentals)
+    "INV_CRUDE", "PROD_US",
     # commodity
     "CL=F", "BZ=F", "NG=F", "HG=F", "SI=F", "PL=F", "PA=F",
     # risk
@@ -246,6 +283,8 @@ FACTOR_LABELS_JA: dict[str, str] = {
     "HYG": "ハイイールド債ETF",
     "LQD": "投資適格債ETF",
     "CREDIT_PROXY": "クレジット選好(HY/IG)",
+    "INV_CRUDE": "米原油在庫(EIA)",
+    "PROD_US": "米原油生産(EIA)",
     "CL=F": "WTI原油",
     "BZ=F": "ブレント原油",
     "NG=F": "天然ガス",
@@ -283,20 +322,24 @@ class Asset:
     price_decimals: int = 0
     price_prefix: str = "$"           # currency symbol before the number
     price_suffix: str = ""            # unit after the number (e.g. 円)
+    crosscheck: tuple = ()            # (ticker, label) for a non-circular
+    #                                   benchmark spread panel, e.g. WTI vs Brent
 
 
-# Crude oil drivers: dollar (-), copper/equities/EM/China (global demand, +),
-# vol & credit (risk appetite / financial conditions), 10Y nominal (growth, +).
-# Brent/gasoline are excluded as they ARE crude (circular, spurious R²≈0.99).
+# Crude oil drivers. Demand/financial side kept lean (one broad equity proxy)
+# after diagnosing that copper + EM/China were collinear and — being in their
+# own electrification-driven bull market — decoupled from oil and inflated the
+# fair value badly (fitted ~$126 vs ~$77 spot). Supply side added: EIA crude
+# inventory (-) and US field production (-). Brent/other crudes stay out
+# (circular). This trades some R² for a far more realistic fair value.
 OIL_DEFAULT_FACTORS: tuple[str, ...] = (
     "DX-Y.NYB",
-    "HG=F",
     "^GSPC",
-    "EEM",
-    "FXI",
     "^VIX",
     "^TNX",
     "CREDIT_PROXY",
+    "INV_CRUDE",
+    "PROD_US",
 )
 
 OIL_TICKER = "CL=F"
@@ -335,6 +378,7 @@ ASSETS: dict[str, Asset] = {
         default_factors=OIL_DEFAULT_FACTORS,
         exclude=("CL=F", "BZ=F", "GOLD_SILVER"),
         price_decimals=1,
+        crosscheck=("BZ=F", "Brent"),
     ),
     "jpy": Asset(
         key="jpy", target="JPY=X", name="ドル円", unit="円/ドル", icon="💴",

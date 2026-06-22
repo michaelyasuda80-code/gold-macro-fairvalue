@@ -226,6 +226,34 @@ def render_dashboard(cfg: D.Asset):
     heat.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(heat, use_container_width=True, key=f"{k}_heat")
 
+    # --- クロスチェック: ベンチマークとのスプレッド（循環しない参考） ---
+    if cfg.crosscheck and cfg.crosscheck[0] in panel.columns:
+        bench_t, bench_l = cfg.crosscheck
+        st.subheader(f"クロスチェック：{cfg.name} − {bench_l} スプレッド")
+        cc = panel[[cfg.target, bench_t]].dropna()
+        own = np.exp(cc[cfg.target]); bench = np.exp(cc[bench_t])
+        spread = own - bench
+        sp_now = float(spread.iloc[-1])
+        st.caption(
+            f"最新：{cfg.name} {price(float(own.iloc[-1]))} − {bench_l} "
+            f"{cfg.price_prefix}{float(bench.iloc[-1]):,.{cfg.price_decimals}f}"
+            f"{cfg.price_suffix} ＝ スプレッド {sp_now:+.1f}。"
+            "スプレッドが平常域なら割安は『世界的』、大きく負なら『米国固有（供給過剰・在庫膨張）』のサイン。"
+            "※ベンチマークはモデルの説明変数には入れない（原油で原油を説明＝循環のため）。"
+        )
+        ccfig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
+                              row_heights=[0.6, 0.4])
+        ccfig.add_trace(go.Scatter(x=cc.index, y=own, name=cfg.name, line=dict(width=2)), row=1, col=1)
+        ccfig.add_trace(go.Scatter(x=cc.index, y=bench, name=bench_l, line=dict(width=2)), row=1, col=1)
+        ccfig.add_trace(go.Scatter(x=cc.index, y=spread, name="スプレッド", line=dict(width=1.5)), row=2, col=1)
+        ccfig.add_hline(y=0, line=dict(width=1, color="gray"), row=2, col=1)
+        ccfig.update_yaxes(title_text=cfg.unit, row=1, col=1)
+        ccfig.update_yaxes(title_text="差", row=2, col=1)
+        ccfig.update_layout(height=460, hovermode="x unified",
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                            margin=dict(t=30))
+        st.plotly_chart(ccfig, use_container_width=True, key=f"{k}_cc")
+
 
 # ---------------- ページ全体 ----------------
 
